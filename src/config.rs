@@ -24,6 +24,7 @@ pub struct QueueConfig {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct WorkerConfig {
+    pub queues: Vec<String>,
     pub num_workers_per_queue: usize,
 }
 

@@ -1,0 +1,33 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: rustyqueue
+      POSTGRES_PASSWORD: rustyqueue
+      POSTGRES_DB: rustyqueue
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rustyqueue"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  rustyqueue:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      RUSTYQUEUE__DATABASE__URL: postgres://rustyqueue:rustyqueue@postgres:5432/rustyqueue
+      RUSTYQUEUE__SERVER__HOST: "0.0.0.0"
+      RUST_LOG: info
+    ports:
+      - "8080:8080"
+
+volumes:
+  postgres_data:

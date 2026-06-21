@@ -1,23 +1,11 @@
 use clap::Parser;
-use std::sync::Arc;
-use tokio::signal;
+use rustyqueue::{api, config::{AppConfig, Cli}, db, metrics, watchdog, worker, AppState};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+use tokio::{signal, time::Duration};
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
-
-mod api;
-mod config;
-mod db;
-mod error;
-mod metrics;
-mod watchdog;
-mod worker;
-
-use crate::config::{AppConfig, Cli};
-
-pub struct AppState {
-    pub pool: sqlx::PgPool,
-    pub config: AppConfig,
-    pub shutdown_tx: tokio::sync::broadcast::Sender<()>,
-}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -42,11 +30,16 @@ async fn main() -> anyhow::Result<()> {
     metrics::register_metrics();
 
     let (shutdown_tx, _) = tokio::sync::broadcast::channel::<()>(1);
+    let circuit_open = Arc::new(AtomicBool::new(false));
+
     let state = Arc::new(AppState {
         pool: pool.clone(),
         config: cfg.clone(),
         shutdown_tx: shutdown_tx.clone(),
+        circuit_open: circuit_open.clone(),
     });
+
+    start_circuit_breaker_monitor(pool.clone(), circuit_open, shutdown_tx.clone());
 
     let worker_handle = worker::start(state.clone()).await;
     let watchdog_handle = watchdog::start(state.clone()).await;
@@ -64,12 +57,52 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("HTTP server stopped; waiting for workers (30s grace period)");
     let _ = shutdown_tx.send(());
 
-    let grace = tokio::time::Duration::from_secs(30);
+    let grace = Duration::from_secs(30);
     let _ = tokio::time::timeout(grace, worker_handle).await;
     let _ = tokio::time::timeout(grace, watchdog_handle).await;
 
     tracing::info!("RustyQueue shutdown complete");
     Ok(())
+}
+
+fn start_circuit_breaker_monitor(
+    pool: sqlx::PgPool,
+    flag: Arc<AtomicBool>,
+    shutdown_tx: tokio::sync::broadcast::Sender<()>,
+) {
+    tokio::spawn(async move {
+        let mut saturation_since: Option<std::time::Instant> = None;
+        let mut interval = tokio::time::interval(Duration::from_millis(500));
+        let mut shutdown_rx = shutdown_tx.subscribe();
+
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {}
+                _ = shutdown_rx.recv() => return,
+            }
+
+            let reachable = tokio::time::timeout(
+                Duration::from_millis(200),
+                pool.acquire(),
+            )
+            .await
+            .map(|r| r.is_ok())
+            .unwrap_or(false);
+
+            if reachable {
+                if saturation_since.take().is_some() && flag.load(Ordering::Relaxed) {
+                    tracing::info!("DB pool recovered — closing circuit breaker");
+                    flag.store(false, Ordering::Relaxed);
+                }
+            } else {
+                let since = saturation_since.get_or_insert_with(std::time::Instant::now);
+                if since.elapsed() > Duration::from_secs(5) && !flag.load(Ordering::Relaxed) {
+                    tracing::warn!("DB pool unreachable >5 s — opening circuit breaker");
+                    flag.store(true, Ordering::Relaxed);
+                }
+            }
+        }
+    });
 }
 
 async fn shutdown_signal(tx: tokio::sync::broadcast::Sender<()>) {

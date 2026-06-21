@@ -8,6 +8,7 @@ poll_interval_ms = 500
 max_command_timeout_seconds = 300
 
 [worker]
+queues = ["default"]
 num_workers_per_queue = 4
 
 [server]

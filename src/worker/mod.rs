@@ -13,73 +13,73 @@ use crate::AppState;
 use dispatcher::dispatch_loop;
 use executor::execute_task;
 
-// For now we hardcode the queue name; in a multi-queue setup, this
-// would be driven by config or DB discovery.
-const DEFAULT_QUEUE: &str = "default";
-
 pub async fn start(state: Arc<AppState>) -> JoinHandle<()> {
+    let queues = state.config.worker.queues.clone();
     let num_workers = state.config.worker.num_workers_per_queue;
 
-    // Channel sized to num_workers so dispatch never gets too far ahead
+    for queue in queues {
+        spawn_queue_workers(state.clone(), queue, num_workers);
+    }
+
+    spawn_queue_length_poller(state.clone());
+
+    // Return a handle that resolves on shutdown
+    let mut rx = state.shutdown_tx.subscribe();
+    tokio::spawn(async move { let _ = rx.recv().await; })
+}
+
+fn spawn_queue_workers(state: Arc<AppState>, queue: String, num_workers: usize) {
+    // Channel depth = num_workers: dispatcher stays at most one batch ahead
     let (tx, rx) = mpsc::channel::<DbTask>(num_workers);
     let rx = Arc::new(tokio::sync::Mutex::new(rx));
 
-    // Spawn the dispatcher
-    let disp_state = state.clone();
-    tokio::spawn(dispatch_loop(disp_state, DEFAULT_QUEUE.to_string(), tx));
+    // One dispatcher per queue
+    tokio::spawn(dispatch_loop(state.clone(), queue.clone(), tx));
 
-    // Spawn N workers
+    // N workers sharing the same receiver
     for worker_id in 0..num_workers {
         let rx = rx.clone();
         let state = state.clone();
+        let queue = queue.clone();
         tokio::spawn(async move {
             let mut shutdown_rx = state.shutdown_tx.subscribe();
+            tracing::info!(worker_id, queue = %queue, "Worker started");
             loop {
                 let task = {
                     let mut guard = rx.lock().await;
                     tokio::select! {
                         msg = guard.recv() => msg,
                         _ = shutdown_rx.recv() => {
-                            tracing::info!(worker_id, "Worker shutting down");
+                            tracing::info!(worker_id, queue = %queue, "Worker shutting down");
                             return;
                         }
                     }
                 };
                 match task {
-                    Some(t) => {
-                        tracing::debug!(worker_id, task_id = %t.id, "Worker picked up task");
-                        execute_task(state.clone(), t).await;
-                    }
+                    Some(t) => execute_task(state.clone(), t).await,
                     None => {
-                        tracing::info!(worker_id, "Task channel closed, worker exiting");
+                        tracing::info!(worker_id, queue = %queue, "Channel closed, worker exiting");
                         return;
                     }
                 }
             }
         });
     }
+}
 
-    // Background queue-length gauge poller (every 10s)
-    let gauge_state = state.clone();
+fn spawn_queue_length_poller(state: Arc<AppState>) {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(10));
-        let mut shutdown_rx = gauge_state.shutdown_tx.subscribe();
+        let mut shutdown_rx = state.shutdown_tx.subscribe();
         loop {
             tokio::select! {
                 _ = interval.tick() => {}
                 _ = shutdown_rx.recv() => return,
             }
-            match get_queue_length(&gauge_state.pool).await {
+            match get_queue_length(&state.pool).await {
                 Ok(len) => QUEUE_LENGTH.set(len as f64),
                 Err(e) => tracing::warn!(error = %e, "Failed to poll queue length"),
             }
         }
     });
-
-    // Return a join handle that resolves when shutdown is signalled
-    let state = state.clone();
-    tokio::spawn(async move {
-        let mut rx = state.shutdown_tx.subscribe();
-        let _ = rx.recv().await;
-    })
 }

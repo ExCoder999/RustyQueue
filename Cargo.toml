@@ -1,0 +1,62 @@
+[package]
+name = "rustyqueue"
+version = "0.1.0"
+edition = "2021"
+authors = ["curiousking334@gmail.com"]
+
+[[bin]]
+name = "rustyqueue"
+path = "src/main.rs"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full", "rt-multi-thread"] }
+
+# Web framework
+axum = { version = "0.7", features = ["json", "macros"] }
+tower = { version = "0.4", features = ["full"] }
+tower-http = { version = "0.5", features = ["trace", "limit"] }
+
+# Database
+sqlx = { version = "0.7", features = [
+    "runtime-tokio-native-tls",
+    "postgres",
+    "uuid",
+    "json",
+    "chrono",
+    "migrate",
+] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# UUID
+uuid = { version = "1", features = ["v4", "v7", "serde"] }
+
+# Tracing / logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+
+# Metrics
+prometheus = { version = "0.13", features = ["process"] }
+
+# Config & CLI
+clap = { version = "4", features = ["derive", "env"] }
+config = "0.14"
+
+# Error handling
+thiserror = "1"
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Misc
+sha2 = "0.10"
+hex = "0.4"
+once_cell = "1"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

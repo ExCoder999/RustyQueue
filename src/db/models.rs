@@ -1,0 +1,58 @@
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use sqlx::FromRow;
+use uuid::Uuid;
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct DbTask {
+    pub id: Uuid,
+    pub queue: String,
+    pub payload: serde_json::Value,
+    pub status: String,
+    pub priority: i32,
+    pub max_retries: i16,
+    pub retries: i16,
+    pub scheduled_at: DateTime<Utc>,
+    pub leased_until: Option<DateTime<Utc>>,
+    pub last_heartbeat_at: Option<DateTime<Utc>>,
+    pub last_error: Option<String>,
+    pub idempotency_key: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NewTask {
+    pub queue: String,
+    pub payload: serde_json::Value,
+    pub max_retries: i16,
+    pub priority: i32,
+    pub scheduled_at: DateTime<Utc>,
+    pub idempotency_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct DlqTask {
+    pub id: Uuid,
+    pub queue: String,
+    pub payload: serde_json::Value,
+    pub status: String,
+    pub priority: i32,
+    pub max_retries: i16,
+    pub retries: i16,
+    pub scheduled_at: DateTime<Utc>,
+    pub leased_until: Option<DateTime<Utc>>,
+    pub last_heartbeat_at: Option<DateTime<Utc>>,
+    pub last_error: Option<String>,
+    pub idempotency_key: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub failed_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskStatus {
+    pub id: Uuid,
+    pub status: String,
+    pub retries: i16,
+    pub last_error: Option<String>,
+    pub created_at: DateTime<Utc>,
+}

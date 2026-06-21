@@ -52,6 +52,7 @@ async fn test_state(pool: sqlx::PgPool) -> std::sync::Arc<rustyqueue::AppState> 
         config: cfg,
         shutdown_tx,
         circuit_open: Arc::new(AtomicBool::new(false)),
+        task_cancel_tokens: Default::default(),
     })
 }
 
@@ -182,6 +183,7 @@ async fn test_circuit_breaker_blocks_writes_when_open() {
         config: cfg,
         shutdown_tx,
         circuit_open,
+        task_cancel_tokens: Default::default(),
     });
 
     let app = rustyqueue::api::build_router(state);

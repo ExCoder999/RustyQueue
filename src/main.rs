@@ -37,6 +37,7 @@ async fn main() -> anyhow::Result<()> {
         config: cfg.clone(),
         shutdown_tx: shutdown_tx.clone(),
         circuit_open: circuit_open.clone(),
+        task_cancel_tokens: Default::default(),
     });
 
     start_circuit_breaker_monitor(pool.clone(), circuit_open, shutdown_tx.clone());

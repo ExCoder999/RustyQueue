@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use tokio::process::Command;
 use tokio::time::{timeout, Duration};
+use tokio_util::sync::CancellationToken;
 
 use crate::db::{
     models::DbTask,
@@ -15,13 +16,20 @@ pub async fn execute_task(state: Arc<AppState>, task: DbTask) {
     let max_timeout = Duration::from_secs(state.config.queue.max_command_timeout_seconds);
     let pool = state.pool.clone();
 
+    // Register a cancellation token so the cancel endpoint can abort this
+    // specific task without broadcasting a global shutdown signal.
+    let cancel_token = CancellationToken::new();
+    state.task_cancel_tokens.insert(task_id, cancel_token.clone());
+
     ACTIVE_WORKERS.inc();
     let start = std::time::Instant::now();
 
     tracing::info!(task_id = %task_id, queue = %queue, event = "Leased", "Task execution started");
 
-    let result = timeout(max_timeout, run_command(&state, &task)).await;
+    let result = timeout(max_timeout, run_command(&state, &task, cancel_token)).await;
 
+    // Always deregister — cancel endpoint may have already removed it, that's fine.
+    state.task_cancel_tokens.remove(&task_id);
     ACTIVE_WORKERS.dec();
     let elapsed = start.elapsed().as_secs_f64();
 
@@ -51,10 +59,15 @@ pub async fn execute_task(state: Arc<AppState>, task: DbTask) {
     }
 }
 
-async fn run_command(state: &Arc<AppState>, task: &DbTask) -> anyhow::Result<()> {
-    let command_value = task.payload.get("command").ok_or_else(|| {
-        anyhow::anyhow!("payload missing 'command' field")
-    })?;
+async fn run_command(
+    state: &Arc<AppState>,
+    task: &DbTask,
+    cancel_token: CancellationToken,
+) -> anyhow::Result<()> {
+    let command_value = task
+        .payload
+        .get("command")
+        .ok_or_else(|| anyhow::anyhow!("payload missing 'command' field"))?;
 
     let args: Vec<String> = serde_json::from_value(command_value.clone())
         .map_err(|e| anyhow::anyhow!("'command' must be an array of strings: {}", e))?;
@@ -91,21 +104,26 @@ async fn run_command(state: &Arc<AppState>, task: &DbTask) -> anyhow::Result<()>
             heartbeat_handle.abort();
             status.map_err(|e| anyhow::anyhow!("Process wait error: {}", e))?
         }
+        // Process-wide graceful shutdown (SIGINT / SIGTERM)
         _ = shutdown_rx.recv() => {
             heartbeat_handle.abort();
             let _ = child.kill().await;
             let _ = child.wait().await;
-            return Err(anyhow::anyhow!("Task aborted due to shutdown signal"));
+            return Err(anyhow::anyhow!("Task aborted: process shutting down"));
+        }
+        // Per-task cancellation triggered by POST /tasks/:id/cancel
+        _ = cancel_token.cancelled() => {
+            heartbeat_handle.abort();
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            return Err(anyhow::anyhow!("Task cancelled by user request"));
         }
     };
 
     if exit_status.success() {
         Ok(())
     } else {
-        Err(anyhow::anyhow!(
-            "Process exited with status: {}",
-            exit_status
-        ))
+        Err(anyhow::anyhow!("Process exited with status: {}", exit_status))
     }
 }
 

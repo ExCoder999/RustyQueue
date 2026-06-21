@@ -213,6 +213,16 @@ pub async fn get_queue_length(pool: &PgPool) -> AppResult<i64> {
     Ok(count)
 }
 
+pub async fn get_queue_length_by_queue(pool: &PgPool, queue: &str) -> AppResult<i64> {
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM tasks WHERE status = 'Pending' AND queue = $1",
+    )
+    .bind(queue)
+    .fetch_one(pool)
+    .await?;
+    Ok(count)
+}
+
 pub async fn get_idempotency_task_id(pool: &PgPool, key_hash: &str) -> AppResult<Option<Uuid>> {
     let task_id: Option<Uuid> =
         sqlx::query_scalar("SELECT task_id FROM idempotency_keys WHERE key_hash = $1")

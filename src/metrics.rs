@@ -1,7 +1,7 @@
 use once_cell::sync::Lazy;
 use prometheus::{
-    register_counter_vec, register_gauge, register_histogram_vec, CounterVec, Gauge, HistogramVec,
-    TextEncoder,
+    register_counter_vec, register_gauge, register_gauge_vec, register_histogram_vec,
+    CounterVec, Gauge, GaugeVec, HistogramVec, TextEncoder,
 };
 
 pub static TASKS_ENQUEUED: Lazy<CounterVec> = Lazy::new(|| {
@@ -23,9 +23,14 @@ pub static TASKS_DURATION: Lazy<HistogramVec> = Lazy::new(|| {
     .expect("Failed to register tasks_duration_seconds")
 });
 
-pub static QUEUE_LENGTH: Lazy<Gauge> = Lazy::new(|| {
-    register_gauge!("queue_length", "Number of pending tasks in the queue")
-        .expect("Failed to register queue_length")
+/// Pending task count broken down per queue name.
+pub static QUEUE_LENGTH: Lazy<GaugeVec> = Lazy::new(|| {
+    register_gauge_vec!(
+        "queue_length",
+        "Number of pending tasks per queue",
+        &["queue"]
+    )
+    .expect("Failed to register queue_length")
 });
 
 pub static ACTIVE_WORKERS: Lazy<Gauge> = Lazy::new(|| {
@@ -34,7 +39,6 @@ pub static ACTIVE_WORKERS: Lazy<Gauge> = Lazy::new(|| {
 });
 
 pub fn register_metrics() {
-    // Force lazy initialization
     Lazy::force(&TASKS_ENQUEUED);
     Lazy::force(&TASKS_DURATION);
     Lazy::force(&QUEUE_LENGTH);

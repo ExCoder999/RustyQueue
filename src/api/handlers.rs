@@ -115,8 +115,11 @@ pub async fn cancel_task_handler(
     State(state): State<Arc<AppState>>,
     Path(task_id): Path<Uuid>,
 ) -> AppResult<impl IntoResponse> {
-    // Signal via broadcast so inflight worker can abort
-    let _ = state.shutdown_tx.send(());
+    // Best-effort: if the task is currently executing, cancel its token so
+    // the executor can kill the child process without touching other workers.
+    if let Some((_, token)) = state.task_cancel_tokens.remove(&task_id) {
+        token.cancel();
+    }
 
     let cancelled = cancel_task(&state.pool, task_id).await?;
     if cancelled {

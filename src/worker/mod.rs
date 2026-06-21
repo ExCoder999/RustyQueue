@@ -6,7 +6,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use crate::db::models::DbTask;
-use crate::db::queries::get_queue_length;
+use crate::db::queries::get_queue_length_by_queue;
 use crate::metrics::QUEUE_LENGTH;
 use crate::AppState;
 
@@ -68,6 +68,7 @@ fn spawn_queue_workers(state: Arc<AppState>, queue: String, num_workers: usize) 
 }
 
 fn spawn_queue_length_poller(state: Arc<AppState>) {
+    let queues = state.config.worker.queues.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(10));
         let mut shutdown_rx = state.shutdown_tx.subscribe();
@@ -76,9 +77,11 @@ fn spawn_queue_length_poller(state: Arc<AppState>) {
                 _ = interval.tick() => {}
                 _ = shutdown_rx.recv() => return,
             }
-            match get_queue_length(&state.pool).await {
-                Ok(len) => QUEUE_LENGTH.set(len as f64),
-                Err(e) => tracing::warn!(error = %e, "Failed to poll queue length"),
+            for queue in &queues {
+                match get_queue_length_by_queue(&state.pool, queue).await {
+                    Ok(len) => QUEUE_LENGTH.with_label_values(&[queue]).set(len as f64),
+                    Err(e) => tracing::warn!(error = %e, queue = %queue, "Failed to poll queue length"),
+                }
             }
         }
     });

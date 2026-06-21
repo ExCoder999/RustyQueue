@@ -36,7 +36,9 @@ pub async fn dispatch_loop(
             Ok(None) => {
                 // Queue empty; no backoff needed
             }
-            Err(sqlx::Error::PoolTimedOut) | Err(sqlx::Error::PoolClosed) => {
+            Err(crate::error::AppError::Database(ref e))
+                if matches!(e, sqlx::Error::PoolTimedOut | sqlx::Error::PoolClosed) =>
+            {
                 tracing::error!(
                     queue = %queue,
                     backoff_secs = backoff.as_secs(),

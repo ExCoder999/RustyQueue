@@ -58,6 +58,6 @@ impl AppConfig {
             )
             .build()?;
 
-        Ok(cfg.try_deserialize()?)
+        Ok(cfg.try_deserialize::<AppConfig>()?)
     }
 }

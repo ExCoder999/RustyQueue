@@ -1,4 +1,3 @@
-use chrono::Utc;
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -7,19 +6,19 @@ use crate::error::{AppError, AppResult};
 
 pub async fn insert_task(pool: &PgPool, task: NewTask) -> AppResult<Uuid> {
     let id = Uuid::now_v7();
-    sqlx::query!(
+    sqlx::query(
         r#"
         INSERT INTO tasks (id, queue, payload, status, priority, max_retries, scheduled_at, idempotency_key)
         VALUES ($1, $2, $3, 'Pending', $4, $5, $6, $7)
         "#,
-        id,
-        task.queue,
-        task.payload,
-        task.priority,
-        task.max_retries,
-        task.scheduled_at,
-        task.idempotency_key,
     )
+    .bind(id)
+    .bind(&task.queue)
+    .bind(&task.payload)
+    .bind(task.priority)
+    .bind(task.max_retries)
+    .bind(task.scheduled_at)
+    .bind(&task.idempotency_key)
     .execute(pool)
     .await?;
 
@@ -27,15 +26,10 @@ pub async fn insert_task(pool: &PgPool, task: NewTask) -> AppResult<Uuid> {
 }
 
 pub async fn get_task_status(pool: &PgPool, id: Uuid) -> AppResult<TaskStatus> {
-    let row = sqlx::query_as!(
-        TaskStatus,
-        r#"
-        SELECT id, status, retries, last_error, created_at
-        FROM tasks
-        WHERE id = $1
-        "#,
-        id
+    let row = sqlx::query_as::<_, TaskStatus>(
+        "SELECT id, status, retries, last_error, created_at FROM tasks WHERE id = $1",
     )
+    .bind(id)
     .fetch_optional(pool)
     .await?;
 
@@ -44,15 +38,10 @@ pub async fn get_task_status(pool: &PgPool, id: Uuid) -> AppResult<TaskStatus> {
     }
 
     // Check DLQ
-    let dlq_row = sqlx::query_as!(
-        TaskStatus,
-        r#"
-        SELECT id, status, retries, last_error, created_at
-        FROM dead_letter_tasks
-        WHERE id = $1
-        "#,
-        id
+    let dlq_row = sqlx::query_as::<_, TaskStatus>(
+        "SELECT id, status, retries, last_error, created_at FROM dead_letter_tasks WHERE id = $1",
     )
+    .bind(id)
     .fetch_optional(pool)
     .await?;
 
@@ -60,23 +49,22 @@ pub async fn get_task_status(pool: &PgPool, id: Uuid) -> AppResult<TaskStatus> {
 }
 
 pub async fn cancel_task(pool: &PgPool, id: Uuid) -> AppResult<bool> {
-    let result = sqlx::query!(
-        r#"
-        UPDATE tasks
-        SET status = 'Failed', last_error = 'Cancelled by user'
-        WHERE id = $1 AND status IN ('Pending', 'Processing')
-        "#,
-        id
+    let result = sqlx::query(
+        "UPDATE tasks SET status = 'Failed', last_error = 'Cancelled by user' WHERE id = $1 AND status IN ('Pending', 'Processing')",
     )
+    .bind(id)
     .execute(pool)
     .await?;
 
     Ok(result.rows_affected() > 0)
 }
 
-pub async fn fetch_pending_task(pool: &PgPool, queue: &str, lease_seconds: i64) -> AppResult<Option<DbTask>> {
-    let task = sqlx::query_as!(
-        DbTask,
+pub async fn fetch_pending_task(
+    pool: &PgPool,
+    queue: &str,
+    lease_seconds: i64,
+) -> AppResult<Option<DbTask>> {
+    let task = sqlx::query_as::<_, DbTask>(
         r#"
         UPDATE tasks
         SET
@@ -97,9 +85,9 @@ pub async fn fetch_pending_task(pool: &PgPool, queue: &str, lease_seconds: i64) 
             scheduled_at, leased_until, last_heartbeat_at, last_error,
             idempotency_key, created_at
         "#,
-        queue,
-        lease_seconds,
     )
+    .bind(queue)
+    .bind(lease_seconds)
     .fetch_optional(pool)
     .await?;
 
@@ -107,32 +95,26 @@ pub async fn fetch_pending_task(pool: &PgPool, queue: &str, lease_seconds: i64) 
 }
 
 pub async fn mark_complete(pool: &PgPool, id: Uuid) -> AppResult<()> {
-    sqlx::query!(
-        r#"UPDATE tasks SET status = 'Completed', leased_until = NULL WHERE id = $1"#,
-        id
-    )
-    .execute(pool)
-    .await?;
+    sqlx::query("UPDATE tasks SET status = 'Completed', leased_until = NULL WHERE id = $1")
+        .bind(id)
+        .execute(pool)
+        .await?;
     Ok(())
 }
 
 pub async fn mark_failed(pool: &PgPool, id: Uuid, error: &str) -> AppResult<()> {
-    sqlx::query!(
-        r#"
-        UPDATE tasks
-        SET status = 'Failed', last_error = $2, leased_until = NULL
-        WHERE id = $1
-        "#,
-        id,
-        error,
+    sqlx::query(
+        "UPDATE tasks SET status = 'Failed', last_error = $2, leased_until = NULL WHERE id = $1",
     )
+    .bind(id)
+    .bind(error)
     .execute(pool)
     .await?;
     Ok(())
 }
 
 pub async fn increment_retry(pool: &PgPool, id: Uuid, error: &str) -> AppResult<()> {
-    sqlx::query!(
+    sqlx::query(
         r#"
         UPDATE tasks
         SET
@@ -143,9 +125,9 @@ pub async fn increment_retry(pool: &PgPool, id: Uuid, error: &str) -> AppResult<
             scheduled_at = NOW() + INTERVAL '5 seconds'
         WHERE id = $1
         "#,
-        id,
-        error,
     )
+    .bind(id)
+    .bind(error)
     .execute(pool)
     .await?;
     Ok(())
@@ -154,7 +136,7 @@ pub async fn increment_retry(pool: &PgPool, id: Uuid, error: &str) -> AppResult<
 pub async fn move_to_dlq(pool: &PgPool, id: Uuid) -> AppResult<()> {
     let mut tx = pool.begin().await?;
 
-    sqlx::query!(
+    sqlx::query(
         r#"
         INSERT INTO dead_letter_tasks
             (id, queue, payload, status, priority, max_retries, retries,
@@ -167,12 +149,13 @@ pub async fn move_to_dlq(pool: &PgPool, id: Uuid) -> AppResult<()> {
         FROM tasks
         WHERE id = $1
         "#,
-        id,
     )
+    .bind(id)
     .execute(&mut *tx)
     .await?;
 
-    sqlx::query!("DELETE FROM tasks WHERE id = $1", id)
+    sqlx::query("DELETE FROM tasks WHERE id = $1")
+        .bind(id)
         .execute(&mut *tx)
         .await?;
 
@@ -181,17 +164,17 @@ pub async fn move_to_dlq(pool: &PgPool, id: Uuid) -> AppResult<()> {
 }
 
 pub async fn update_heartbeat(pool: &PgPool, id: Uuid) -> AppResult<()> {
-    sqlx::query!(
-        r#"UPDATE tasks SET last_heartbeat_at = NOW() WHERE id = $1 AND status = 'Processing'"#,
-        id
+    sqlx::query(
+        "UPDATE tasks SET last_heartbeat_at = NOW() WHERE id = $1 AND status = 'Processing'",
     )
+    .bind(id)
     .execute(pool)
     .await?;
     Ok(())
 }
 
 pub async fn reset_stuck_leases(pool: &PgPool) -> AppResult<u64> {
-    let result = sqlx::query!(
+    let result = sqlx::query(
         r#"
         UPDATE tasks
         SET
@@ -201,7 +184,7 @@ pub async fn reset_stuck_leases(pool: &PgPool) -> AppResult<u64> {
             last_error = 'Lease expired (worker crash or timeout)'
         WHERE status = 'Processing'
           AND leased_until < NOW()
-        "#
+        "#,
     )
     .execute(pool)
     .await?;
@@ -209,46 +192,42 @@ pub async fn reset_stuck_leases(pool: &PgPool) -> AppResult<u64> {
 }
 
 pub async fn move_exceeded_retries_to_dlq(pool: &PgPool) -> AppResult<u64> {
-    let exceeded = sqlx::query!(
-        r#"SELECT id FROM tasks WHERE retries >= max_retries AND status IN ('Pending', 'Failed')"#
+    let rows: Vec<(Uuid,)> = sqlx::query_as(
+        "SELECT id FROM tasks WHERE retries >= max_retries AND status IN ('Pending', 'Failed')",
     )
     .fetch_all(pool)
     .await?;
 
-    let count = exceeded.len() as u64;
-    for row in exceeded {
-        move_to_dlq(pool, row.id).await?;
+    let count = rows.len() as u64;
+    for (id,) in rows {
+        move_to_dlq(pool, id).await?;
     }
     Ok(count)
 }
 
 pub async fn get_queue_length(pool: &PgPool) -> AppResult<i64> {
-    let row = sqlx::query!("SELECT COUNT(*) as count FROM tasks WHERE status = 'Pending'")
-        .fetch_one(pool)
-        .await?;
-    Ok(row.count.unwrap_or(0))
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM tasks WHERE status = 'Pending'")
+            .fetch_one(pool)
+            .await?;
+    Ok(count)
 }
 
 pub async fn get_idempotency_task_id(pool: &PgPool, key_hash: &str) -> AppResult<Option<Uuid>> {
-    let row = sqlx::query!(
-        "SELECT task_id FROM idempotency_keys WHERE key_hash = $1",
-        key_hash
-    )
-    .fetch_optional(pool)
-    .await?;
-    Ok(row.map(|r| r.task_id))
+    let task_id: Option<Uuid> =
+        sqlx::query_scalar("SELECT task_id FROM idempotency_keys WHERE key_hash = $1")
+            .bind(key_hash)
+            .fetch_optional(pool)
+            .await?;
+    Ok(task_id)
 }
 
 pub async fn store_idempotency_key(pool: &PgPool, key_hash: &str, task_id: Uuid) -> AppResult<()> {
-    sqlx::query!(
-        r#"
-        INSERT INTO idempotency_keys (key_hash, task_id)
-        VALUES ($1, $2)
-        ON CONFLICT (key_hash) DO NOTHING
-        "#,
-        key_hash,
-        task_id,
+    sqlx::query(
+        "INSERT INTO idempotency_keys (key_hash, task_id) VALUES ($1, $2) ON CONFLICT (key_hash) DO NOTHING",
     )
+    .bind(key_hash)
+    .bind(task_id)
     .execute(pool)
     .await?;
     Ok(())
@@ -264,28 +243,17 @@ pub async fn check_pool_health(pool: &PgPool) -> bool {
     .unwrap_or(false)
 }
 
-pub async fn get_cancelled_task_ids(pool: &PgPool) -> AppResult<Vec<Uuid>> {
-    let rows = sqlx::query!(
-        "SELECT id FROM tasks WHERE status = 'Failed' AND last_error = 'Cancelled by user'"
-    )
-    .fetch_all(pool)
-    .await?;
-    Ok(rows.into_iter().map(|r| r.id).collect())
-}
-
 pub async fn is_task_cancelled(pool: &PgPool, id: Uuid) -> AppResult<bool> {
-    let row = sqlx::query!(
-        "SELECT status, last_error FROM tasks WHERE id = $1",
-        id
-    )
-    .fetch_optional(pool)
-    .await?;
+    let row: Option<(String, Option<String>)> =
+        sqlx::query_as("SELECT status, last_error FROM tasks WHERE id = $1")
+            .bind(id)
+            .fetch_optional(pool)
+            .await?;
 
-    Ok(row.map(|r| {
-        r.status == "Failed" && r.last_error.as_deref() == Some("Cancelled by user")
-    }).unwrap_or(false))
+    Ok(row
+        .map(|(status, last_error)| {
+            status == "Failed" && last_error.as_deref() == Some("Cancelled by user")
+        })
+        .unwrap_or(false))
 }
 
-pub fn utc_now() -> chrono::DateTime<Utc> {
-    Utc::now()
-}

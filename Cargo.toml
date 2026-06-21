@@ -2,7 +2,7 @@
 name = "rustyqueue"
 version = "0.1.0"
 edition = "2021"
-authors = ["curiousking334@gmail.com"]
+authors = ["cobuisang@gmail.com"]
 
 [[bin]]
 name = "rustyqueue"
@@ -47,6 +47,7 @@ config = "0.14"
 
 # Error handling
 thiserror = "1"
+anyhow = "1"
 
 # Time
 chrono = { version = "0.4", features = ["serde"] }

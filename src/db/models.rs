@@ -30,6 +30,7 @@ pub struct NewTask {
     pub idempotency_key: Option<String>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct DlqTask {
     pub id: Uuid,
@@ -48,7 +49,7 @@ pub struct DlqTask {
     pub failed_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct TaskStatus {
     pub id: Uuid,
     pub status: String,

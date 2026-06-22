@@ -379,7 +379,7 @@ async fn test_list_tasks_returns_paged_response() {
         json["total"].as_i64().unwrap() >= 1,
         "total should be at least 1"
     );
-    assert!(json["items"].as_array().unwrap().len() >= 1);
+    assert!(!json["items"].as_array().unwrap().is_empty());
     assert_eq!(json["items"][0]["queue"].as_str().unwrap(), "list-test");
 }
 

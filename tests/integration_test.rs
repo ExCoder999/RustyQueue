@@ -509,3 +509,129 @@ async fn test_dlq_list_and_requeue() {
     let json: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["status"].as_str().unwrap(), "Pending");
 }
+
+#[tokio::test]
+#[ignore = "requires live PostgreSQL at DATABASE_URL"]
+async fn test_batch_enqueue() {
+    let url = std::env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://rustyqueue:rustyqueue@localhost/rustyqueue".into());
+    let pool = sqlx::PgPool::connect(&url).await.unwrap();
+    sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+
+    let state = test_state(pool).await;
+    let app = rustyqueue::api::build_router(state);
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/v1/tasks/batch")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            r#"{"tasks":[
+                {"queue":"batch-test","payload":{"command":["true"]},"max_retries":0},
+                {"queue":"batch-test","payload":{"command":["true"]},"max_retries":0},
+                {"queue":"batch-test","payload":{"command":["true"]},"max_retries":0}
+            ]}"#,
+        ))
+        .unwrap();
+
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        json["task_ids"].as_array().unwrap().len(),
+        3,
+        "batch should return 3 task_ids"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires live PostgreSQL at DATABASE_URL"]
+async fn test_purge_queue() {
+    let url = std::env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://rustyqueue:rustyqueue@localhost/rustyqueue".into());
+    let pool = sqlx::PgPool::connect(&url).await.unwrap();
+    sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+
+    let state = test_state(pool).await;
+    let app = rustyqueue::api::build_router(state.clone());
+
+    for _ in 0..2u8 {
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/v1/tasks")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"queue":"purge-test","payload":{"command":["true"]},"max_retries":0}"#,
+            ))
+            .unwrap();
+        app.clone().oneshot(req).await.unwrap();
+    }
+
+    let req = Request::builder()
+        .method("DELETE")
+        .uri("/api/v1/queues/purge-test/tasks")
+        .body(Body::empty())
+        .unwrap();
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    assert!(
+        json["deleted"].as_u64().unwrap() >= 2,
+        "should have deleted at least the 2 enqueued tasks"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires live PostgreSQL at DATABASE_URL"]
+async fn test_requeue_all_dlq() {
+    use rustyqueue::db::queries::{mark_failed, move_to_dlq};
+
+    let url = std::env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://rustyqueue:rustyqueue@localhost/rustyqueue".into());
+    let pool = sqlx::PgPool::connect(&url).await.unwrap();
+    sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+
+    let state = test_state(pool.clone()).await;
+    let app = rustyqueue::api::build_router(state.clone());
+
+    for _ in 0..2u8 {
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/v1/tasks")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"queue":"bulk-dlq-test","payload":{"command":["false"]},"max_retries":0}"#,
+            ))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&body).unwrap();
+        let id: uuid::Uuid = json["task_id"].as_str().unwrap().parse().unwrap();
+        mark_failed(&pool, id, "forced").await.unwrap();
+        move_to_dlq(&pool, id).await.unwrap();
+    }
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/v1/dlq/requeue-all?queue=bulk-dlq-test")
+        .body(Body::empty())
+        .unwrap();
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["requeued"].as_u64().unwrap(), 2);
+}

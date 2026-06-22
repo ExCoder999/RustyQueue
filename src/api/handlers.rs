@@ -16,8 +16,8 @@ use crate::db::{
     models::NewTask,
     queries::{
         cancel_task, check_pool_health, count_dlq, count_tasks, get_idempotency_task_id,
-        get_queue_stats, get_task_status, insert_task, list_dlq, list_tasks, requeue_dlq_task,
-        store_idempotency_key,
+        get_queue_stats, get_task_status, insert_task, insert_task_batch, list_dlq, list_tasks,
+        purge_queue, requeue_all_dlq, requeue_dlq_task, store_idempotency_key,
     },
 };
 use crate::error::{AppError, AppResult};
@@ -231,6 +231,97 @@ pub async fn requeue_dlq_handler(
             task_id
         )))
     }
+}
+
+// ── Batch enqueue ─────────────────────────────────────────────────────────────
+
+const MAX_BATCH_SIZE: usize = 100;
+
+#[derive(Debug, Deserialize)]
+pub struct BatchEnqueueRequest {
+    pub tasks: Vec<EnqueueRequest>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BatchEnqueueResponse {
+    pub task_ids: Vec<Uuid>,
+}
+
+pub async fn batch_enqueue_handler(
+    State(state): State<Arc<AppState>>,
+    BoundedJson(req): BoundedJson<BatchEnqueueRequest>,
+) -> AppResult<impl IntoResponse> {
+    if req.tasks.is_empty() {
+        return Err(AppError::BadRequest(
+            "tasks array must not be empty".to_string(),
+        ));
+    }
+    if req.tasks.len() > MAX_BATCH_SIZE {
+        return Err(AppError::BadRequest(format!(
+            "batch size {} exceeds maximum of {MAX_BATCH_SIZE}",
+            req.tasks.len(),
+        )));
+    }
+    for task in &req.tasks {
+        if task.queue.is_empty() {
+            return Err(AppError::BadRequest(
+                "queue name cannot be empty".to_string(),
+            ));
+        }
+    }
+
+    let now = Utc::now();
+    let new_tasks: Vec<NewTask> = req
+        .tasks
+        .iter()
+        .map(|t| NewTask {
+            queue: t.queue.clone(),
+            payload: t.payload.clone(),
+            max_retries: t.max_retries as i16,
+            priority: t.priority,
+            scheduled_at: now + chrono::Duration::seconds(t.delay_seconds as i64),
+            idempotency_key: None,
+        })
+        .collect();
+
+    let task_ids = insert_task_batch(&state.pool, new_tasks).await?;
+
+    for (task, id) in req.tasks.iter().zip(task_ids.iter()) {
+        TASKS_ENQUEUED.with_label_values(&[&task.queue]).inc();
+        tracing::info!(task_id = %id, queue = %task.queue, event = "BatchEnqueued");
+    }
+
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(BatchEnqueueResponse { task_ids }),
+    ))
+}
+
+// ── Queue admin ───────────────────────────────────────────────────────────────
+
+pub async fn purge_queue_handler(
+    State(state): State<Arc<AppState>>,
+    Path(queue): Path<String>,
+) -> AppResult<impl IntoResponse> {
+    let deleted = purge_queue(&state.pool, &queue).await?;
+    tracing::info!(queue = %queue, deleted = deleted, event = "QueuePurged");
+    Ok(Json(json!({ "queue": queue, "deleted": deleted })))
+}
+
+// ── DLQ bulk requeue ──────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct RequeueAllQuery {
+    pub queue: Option<String>,
+}
+
+pub async fn requeue_all_dlq_handler(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<RequeueAllQuery>,
+) -> AppResult<impl IntoResponse> {
+    let requeued = requeue_all_dlq(&state.pool, q.queue.as_deref()).await?;
+    tracing::info!(requeued = requeued, event = "DlqBulkRequeued");
+    Ok(Json(json!({ "requeued": requeued })))
 }
 
 // ── Health / metrics ──────────────────────────────────────────────────────────

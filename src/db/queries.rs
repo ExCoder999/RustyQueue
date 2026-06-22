@@ -375,6 +375,61 @@ pub async fn count_dlq(pool: &PgPool, queue: Option<&str>) -> AppResult<i64> {
     Ok(count)
 }
 
+/// Inserts multiple tasks in a single transaction.
+/// Idempotency keys are not supported for batch inserts.
+pub async fn insert_task_batch(pool: &PgPool, tasks: Vec<NewTask>) -> AppResult<Vec<Uuid>> {
+    let mut tx = pool.begin().await?;
+    let mut ids = Vec::with_capacity(tasks.len());
+    for task in tasks {
+        let id = Uuid::now_v7();
+        sqlx::query(
+            r#"
+            INSERT INTO tasks
+                (id, queue, payload, status, priority, max_retries, scheduled_at, idempotency_key)
+            VALUES ($1, $2, $3, 'Pending', $4, $5, $6, $7)
+            "#,
+        )
+        .bind(id)
+        .bind(&task.queue)
+        .bind(&task.payload)
+        .bind(task.priority)
+        .bind(task.max_retries)
+        .bind(task.scheduled_at)
+        .bind(&task.idempotency_key)
+        .execute(&mut *tx)
+        .await?;
+        ids.push(id);
+    }
+    tx.commit().await?;
+    Ok(ids)
+}
+
+/// Deletes all `Pending` tasks in the given queue.
+/// Returns the number of deleted tasks.
+pub async fn purge_queue(pool: &PgPool, queue: &str) -> AppResult<u64> {
+    let result = sqlx::query("DELETE FROM tasks WHERE queue = $1 AND status = 'Pending'")
+        .bind(queue)
+        .execute(pool)
+        .await?;
+    Ok(result.rows_affected())
+}
+
+/// Requeues every task in the dead-letter queue, optionally filtered by queue name.
+/// Returns the count of tasks moved back to `tasks`.
+pub async fn requeue_all_dlq(pool: &PgPool, queue: Option<&str>) -> AppResult<u64> {
+    let rows: Vec<(Uuid,)> =
+        sqlx::query_as("SELECT id FROM dead_letter_tasks WHERE ($1::text IS NULL OR queue = $1)")
+            .bind(queue)
+            .fetch_all(pool)
+            .await?;
+
+    let count = rows.len() as u64;
+    for (id,) in rows {
+        requeue_dlq_task(pool, id).await?;
+    }
+    Ok(count)
+}
+
 /// Moves a DLQ task back to the `tasks` table with retries reset to 0.
 /// Returns `false` if the task wasn't found in the DLQ.
 pub async fn requeue_dlq_task(pool: &PgPool, id: Uuid) -> AppResult<bool> {

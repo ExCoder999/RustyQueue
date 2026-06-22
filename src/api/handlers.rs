@@ -16,8 +16,8 @@ use crate::db::{
     models::NewTask,
     queries::{
         cancel_task, check_pool_health, count_dlq, count_tasks, get_idempotency_task_id,
-        get_queue_stats, get_task_status, insert_task, list_dlq, list_tasks,
-        requeue_dlq_task, store_idempotency_key,
+        get_queue_stats, get_task_status, insert_task, list_dlq, list_tasks, requeue_dlq_task,
+        store_idempotency_key,
     },
 };
 use crate::error::{AppError, AppResult};
@@ -53,7 +53,9 @@ pub async fn enqueue_task(
     BoundedJson(req): BoundedJson<EnqueueRequest>,
 ) -> AppResult<impl IntoResponse> {
     if req.queue.is_empty() {
-        return Err(AppError::BadRequest("queue name cannot be empty".to_string()));
+        return Err(AppError::BadRequest(
+            "queue name cannot be empty".to_string(),
+        ));
     }
 
     let idempotency_key = headers
@@ -164,7 +166,12 @@ pub async fn list_tasks_handler(
         count_tasks(&state.pool, queue, status),
     )?;
 
-    Ok(Json(PagedResponse { items, total, limit, offset: q.offset }))
+    Ok(Json(PagedResponse {
+        items,
+        total,
+        limit,
+        offset: q.offset,
+    }))
 }
 
 // ── Queue stats ───────────────────────────────────────────────────────────────
@@ -199,7 +206,12 @@ pub async fn list_dlq_handler(
         count_dlq(&state.pool, queue),
     )?;
 
-    Ok(Json(PagedResponse { items, total, limit, offset: q.offset }))
+    Ok(Json(PagedResponse {
+        items,
+        total,
+        limit,
+        offset: q.offset,
+    }))
 }
 
 pub async fn requeue_dlq_handler(
@@ -209,7 +221,10 @@ pub async fn requeue_dlq_handler(
     let requeued = requeue_dlq_task(&state.pool, task_id).await?;
     if requeued {
         tracing::info!(task_id = %task_id, event = "Requeued", "DLQ task requeued");
-        Ok((StatusCode::OK, Json(json!({ "task_id": task_id, "requeued": true }))))
+        Ok((
+            StatusCode::OK,
+            Json(json!({ "task_id": task_id, "requeued": true })),
+        ))
     } else {
         Err(AppError::NotFound(format!(
             "Task {} not found in the dead-letter queue",
@@ -235,7 +250,10 @@ pub async fn metrics_handler() -> impl IntoResponse {
     let body = gather_metrics();
     (
         StatusCode::OK,
-        [(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4")],
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4",
+        )],
         body,
     )
 }

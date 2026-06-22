@@ -221,20 +221,18 @@ pub async fn move_exceeded_retries_to_dlq(pool: &PgPool) -> AppResult<u64> {
 }
 
 pub async fn get_queue_length(pool: &PgPool) -> AppResult<i64> {
-    let count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM tasks WHERE status = 'Pending'")
-            .fetch_one(pool)
-            .await?;
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tasks WHERE status = 'Pending'")
+        .fetch_one(pool)
+        .await?;
     Ok(count)
 }
 
 pub async fn get_queue_length_by_queue(pool: &PgPool, queue: &str) -> AppResult<i64> {
-    let count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM tasks WHERE status = 'Pending' AND queue = $1",
-    )
-    .bind(queue)
-    .fetch_one(pool)
-    .await?;
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM tasks WHERE status = 'Pending' AND queue = $1")
+            .bind(queue)
+            .fetch_one(pool)
+            .await?;
     Ok(count)
 }
 

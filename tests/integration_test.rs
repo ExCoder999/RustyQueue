@@ -20,10 +20,12 @@ use tower::ServiceExt; // for `oneshot`
 #[cfg(test)]
 async fn test_state(pool: sqlx::PgPool) -> std::sync::Arc<rustyqueue::AppState> {
     use rustyqueue::{
-        config::{AppConfig, DatabaseConfig, ObservabilityConfig, QueueConfig, ServerConfig, WorkerConfig},
+        config::{
+            AppConfig, DatabaseConfig, ObservabilityConfig, QueueConfig, ServerConfig, WorkerConfig,
+        },
         AppState,
     };
-    use std::sync::{Arc, atomic::AtomicBool};
+    use std::sync::{atomic::AtomicBool, Arc};
 
     let cfg = AppConfig {
         database: DatabaseConfig {
@@ -46,7 +48,9 @@ async fn test_state(pool: sqlx::PgPool) -> std::sync::Arc<rustyqueue::AppState> 
             port: 8080,
             max_concurrent_requests: 512,
         },
-        observability: ObservabilityConfig { otel_endpoint: None },
+        observability: ObservabilityConfig {
+            otel_endpoint: None,
+        },
     };
 
     let (shutdown_tx, _) = tokio::sync::broadcast::channel(1);
@@ -79,16 +83,11 @@ async fn test_payload_too_large_rejected() {
 
     // Use a minimal router that exercises the extractor
     use axum::{extract::State, response::IntoResponse, routing::post, Router};
-    async fn handler(
-        _state: State<()>,
-        BoundedJson(_v): BoundedJson<Value>,
-    ) -> impl IntoResponse {
+    async fn handler(_state: State<()>, BoundedJson(_v): BoundedJson<Value>) -> impl IntoResponse {
         StatusCode::OK
     }
 
-    let app = Router::new()
-        .route("/", post(handler))
-        .with_state(());
+    let app = Router::new().route("/", post(handler)).with_state(());
 
     let response = app.oneshot(req).await.unwrap();
     assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
@@ -96,13 +95,10 @@ async fn test_payload_too_large_rejected() {
 
 #[tokio::test]
 async fn test_valid_small_payload_accepted_by_extractor() {
-    use rustyqueue::api::extractors::BoundedJson;
     use axum::{extract::State, response::IntoResponse, routing::post, Router};
+    use rustyqueue::api::extractors::BoundedJson;
 
-    async fn handler(
-        _state: State<()>,
-        BoundedJson(v): BoundedJson<Value>,
-    ) -> impl IntoResponse {
+    async fn handler(_state: State<()>, BoundedJson(v): BoundedJson<Value>) -> impl IntoResponse {
         assert_eq!(v["hello"], "world");
         StatusCode::OK
     }
@@ -115,9 +111,7 @@ async fn test_valid_small_payload_accepted_by_extractor() {
         .body(body)
         .unwrap();
 
-    let app = Router::new()
-        .route("/", post(handler))
-        .with_state(());
+    let app = Router::new().route("/", post(handler)).with_state(());
 
     let response = app.oneshot(req).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
@@ -125,13 +119,10 @@ async fn test_valid_small_payload_accepted_by_extractor() {
 
 #[tokio::test]
 async fn test_invalid_json_returns_422() {
-    use rustyqueue::api::extractors::BoundedJson;
     use axum::{extract::State, response::IntoResponse, routing::post, Router};
+    use rustyqueue::api::extractors::BoundedJson;
 
-    async fn handler(
-        _state: State<()>,
-        BoundedJson(_v): BoundedJson<Value>,
-    ) -> impl IntoResponse {
+    async fn handler(_state: State<()>, BoundedJson(_v): BoundedJson<Value>) -> impl IntoResponse {
         StatusCode::OK
     }
 
@@ -143,9 +134,7 @@ async fn test_invalid_json_returns_422() {
         .body(body)
         .unwrap();
 
-    let app = Router::new()
-        .route("/", post(handler))
-        .with_state(());
+    let app = Router::new().route("/", post(handler)).with_state(());
 
     let response = app.oneshot(req).await.unwrap();
     assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
@@ -157,7 +146,7 @@ async fn test_invalid_json_returns_422() {
 
 #[tokio::test]
 async fn test_circuit_breaker_blocks_writes_when_open() {
-    use std::sync::{Arc, atomic::AtomicBool};
+    use std::sync::{atomic::AtomicBool, Arc};
 
     // We need a minimal AppState; skip DB init by using a closed channel trick.
     // Because we never actually call DB queries in this test, pool unused.
@@ -168,7 +157,10 @@ async fn test_circuit_breaker_blocks_writes_when_open() {
     use rustyqueue::AppState;
 
     let cfg = AppConfig {
-        database: DatabaseConfig { url: "postgres://x".into(), max_connections: 1 },
+        database: DatabaseConfig {
+            url: "postgres://x".into(),
+            max_connections: 1,
+        },
         queue: QueueConfig {
             default_lease_seconds: 60,
             poll_interval_ms: 500,
@@ -176,9 +168,18 @@ async fn test_circuit_breaker_blocks_writes_when_open() {
             retry_base_delay_seconds: 5,
             retry_max_delay_seconds: 300,
         },
-        worker: WorkerConfig { queues: vec!["default".into()], num_workers_per_queue: 1 },
-        server: ServerConfig { host: "127.0.0.1".into(), port: 8080, max_concurrent_requests: 512 },
-        observability: ObservabilityConfig { otel_endpoint: None },
+        worker: WorkerConfig {
+            queues: vec!["default".into()],
+            num_workers_per_queue: 1,
+        },
+        server: ServerConfig {
+            host: "127.0.0.1".into(),
+            port: 8080,
+            max_concurrent_requests: 512,
+        },
+        observability: ObservabilityConfig {
+            otel_endpoint: None,
+        },
     };
 
     let (shutdown_tx, _) = tokio::sync::broadcast::channel::<()>(1);
@@ -302,9 +303,17 @@ async fn test_idempotency_key_deduplication() {
 
         let response = app.oneshot(req).await.unwrap();
         if i == 0 {
-            assert_eq!(response.status(), StatusCode::ACCEPTED, "first request should succeed");
+            assert_eq!(
+                response.status(),
+                StatusCode::ACCEPTED,
+                "first request should succeed"
+            );
         } else {
-            assert_eq!(response.status(), StatusCode::CONFLICT, "duplicate should be rejected");
+            assert_eq!(
+                response.status(),
+                StatusCode::CONFLICT,
+                "duplicate should be rejected"
+            );
         }
     }
 }
@@ -361,10 +370,15 @@ async fn test_list_tasks_returns_paged_response() {
     let response = app.oneshot(req).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
 
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let json: Value = serde_json::from_slice(&body).unwrap();
 
-    assert!(json["total"].as_i64().unwrap() >= 1, "total should be at least 1");
+    assert!(
+        json["total"].as_i64().unwrap() >= 1,
+        "total should be at least 1"
+    );
     assert!(json["items"].as_array().unwrap().len() >= 1);
     assert_eq!(json["items"][0]["queue"].as_str().unwrap(), "list-test");
 }
@@ -398,7 +412,9 @@ async fn test_list_queues_returns_stats() {
     let response = app.oneshot(req).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
 
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let json: Value = serde_json::from_slice(&body).unwrap();
 
     let queues = json.as_array().expect("expected JSON array");
@@ -434,7 +450,9 @@ async fn test_dlq_list_and_requeue() {
         .unwrap();
     let resp = app.clone().oneshot(enqueue_req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::ACCEPTED);
-    let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let enqueue_json: Value = serde_json::from_slice(&body).unwrap();
     let task_id_str = enqueue_json["task_id"].as_str().unwrap().to_string();
     let task_id: uuid::Uuid = task_id_str.parse().unwrap();
@@ -450,7 +468,9 @@ async fn test_dlq_list_and_requeue() {
     let response = app.clone().oneshot(req).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
 
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let json: Value = serde_json::from_slice(&body).unwrap();
     assert!(json["total"].as_i64().unwrap() >= 1);
     let found = json["items"]
@@ -469,7 +489,9 @@ async fn test_dlq_list_and_requeue() {
     let response = app.clone().oneshot(requeue_req).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
 
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let json: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["requeued"], true);
 
@@ -481,7 +503,9 @@ async fn test_dlq_list_and_requeue() {
     let response = app.oneshot(req).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
 
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let json: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["status"].as_str().unwrap(), "Pending");
 }

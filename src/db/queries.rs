@@ -1,7 +1,7 @@
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::db::models::{DbTask, NewTask, TaskStatus};
+use crate::db::models::{DbTask, DlqSummary, NewTask, QueueStats, TaskStatus, TaskSummary};
 use crate::error::{AppError, AppResult};
 
 pub async fn insert_task(pool: &PgPool, task: NewTask) -> AppResult<Uuid> {
@@ -37,7 +37,6 @@ pub async fn get_task_status(pool: &PgPool, id: Uuid) -> AppResult<TaskStatus> {
         return Ok(task);
     }
 
-    // Check DLQ
     let dlq_row = sqlx::query_as::<_, TaskStatus>(
         "SELECT id, status, retries, last_error, created_at FROM dead_letter_tasks WHERE id = $1",
     )
@@ -50,7 +49,8 @@ pub async fn get_task_status(pool: &PgPool, id: Uuid) -> AppResult<TaskStatus> {
 
 pub async fn cancel_task(pool: &PgPool, id: Uuid) -> AppResult<bool> {
     let result = sqlx::query(
-        "UPDATE tasks SET status = 'Failed', last_error = 'Cancelled by user' WHERE id = $1 AND status IN ('Pending', 'Processing')",
+        "UPDATE tasks SET status = 'Failed', last_error = 'Cancelled by user' \
+         WHERE id = $1 AND status IN ('Pending', 'Processing')",
     )
     .bind(id)
     .execute(pool)
@@ -113,21 +113,36 @@ pub async fn mark_failed(pool: &PgPool, id: Uuid, error: &str) -> AppResult<()> 
     Ok(())
 }
 
-pub async fn increment_retry(pool: &PgPool, id: Uuid, error: &str) -> AppResult<()> {
+/// Reschedule a failed task with exponential backoff.
+/// Delay = min(2^current_retries * base_delay_secs, max_delay_secs)
+pub async fn increment_retry(
+    pool: &PgPool,
+    id: Uuid,
+    error: &str,
+    base_delay_secs: i64,
+    max_delay_secs: i64,
+) -> AppResult<()> {
     sqlx::query(
         r#"
         UPDATE tasks
         SET
-            status = 'Pending',
-            retries = retries + 1,
-            last_error = $2,
+            status      = 'Pending',
+            retries     = retries + 1,
+            last_error  = $2,
             leased_until = NULL,
-            scheduled_at = NOW() + INTERVAL '5 seconds'
+            scheduled_at = NOW() + make_interval(
+                secs => LEAST(
+                    POWER(2, retries::double precision) * $3::double precision,
+                    $4::double precision
+                )::int
+            )
         WHERE id = $1
         "#,
     )
     .bind(id)
     .bind(error)
+    .bind(base_delay_secs)
+    .bind(max_delay_secs)
     .execute(pool)
     .await?;
     Ok(())
@@ -267,3 +282,128 @@ pub async fn is_task_cancelled(pool: &PgPool, id: Uuid) -> AppResult<bool> {
         .unwrap_or(false))
 }
 
+// ── List / admin queries ──────────────────────────────────────────────────────
+
+pub async fn list_tasks(
+    pool: &PgPool,
+    queue: Option<&str>,
+    status: Option<&str>,
+    limit: i64,
+    offset: i64,
+) -> AppResult<Vec<TaskSummary>> {
+    let rows = sqlx::query_as::<_, TaskSummary>(
+        r#"
+        SELECT id, queue, status, priority, retries, max_retries, last_error, scheduled_at, created_at
+        FROM tasks
+        WHERE ($1::text IS NULL OR queue  = $1)
+          AND ($2::text IS NULL OR status = $2)
+        ORDER BY priority DESC, created_at ASC
+        LIMIT $3 OFFSET $4
+        "#,
+    )
+    .bind(queue)
+    .bind(status)
+    .bind(limit)
+    .bind(offset)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+pub async fn count_tasks(
+    pool: &PgPool,
+    queue: Option<&str>,
+    status: Option<&str>,
+) -> AppResult<i64> {
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM tasks WHERE ($1::text IS NULL OR queue = $1) AND ($2::text IS NULL OR status = $2)",
+    )
+    .bind(queue)
+    .bind(status)
+    .fetch_one(pool)
+    .await?;
+    Ok(count)
+}
+
+pub async fn get_queue_stats(pool: &PgPool) -> AppResult<Vec<QueueStats>> {
+    let rows = sqlx::query_as::<_, QueueStats>(
+        r#"
+        SELECT
+            queue,
+            COUNT(*) FILTER (WHERE status = 'Pending')::bigint    AS pending,
+            COUNT(*) FILTER (WHERE status = 'Processing')::bigint AS processing,
+            COUNT(*) FILTER (WHERE status = 'Failed')::bigint     AS failed,
+            COUNT(*) FILTER (WHERE status = 'Completed')::bigint  AS completed
+        FROM tasks
+        GROUP BY queue
+        ORDER BY queue
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+pub async fn list_dlq(
+    pool: &PgPool,
+    queue: Option<&str>,
+    limit: i64,
+    offset: i64,
+) -> AppResult<Vec<DlqSummary>> {
+    let rows = sqlx::query_as::<_, DlqSummary>(
+        r#"
+        SELECT id, queue, retries, max_retries, last_error, created_at, failed_at
+        FROM dead_letter_tasks
+        WHERE ($1::text IS NULL OR queue = $1)
+        ORDER BY failed_at DESC
+        LIMIT $2 OFFSET $3
+        "#,
+    )
+    .bind(queue)
+    .bind(limit)
+    .bind(offset)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+pub async fn count_dlq(pool: &PgPool, queue: Option<&str>) -> AppResult<i64> {
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM dead_letter_tasks WHERE ($1::text IS NULL OR queue = $1)",
+    )
+    .bind(queue)
+    .fetch_one(pool)
+    .await?;
+    Ok(count)
+}
+
+/// Moves a DLQ task back to the `tasks` table with retries reset to 0.
+/// Returns `false` if the task wasn't found in the DLQ.
+pub async fn requeue_dlq_task(pool: &PgPool, id: Uuid) -> AppResult<bool> {
+    let mut tx = pool.begin().await?;
+
+    let result = sqlx::query(
+        r#"
+        INSERT INTO tasks
+            (id, queue, payload, status, priority, max_retries, retries, scheduled_at, created_at)
+        SELECT id, queue, payload, 'Pending', priority, max_retries, 0, NOW(), NOW()
+        FROM dead_letter_tasks
+        WHERE id = $1
+        "#,
+    )
+    .bind(id)
+    .execute(&mut *tx)
+    .await?;
+
+    if result.rows_affected() == 0 {
+        return Ok(false);
+    }
+
+    sqlx::query("DELETE FROM dead_letter_tasks WHERE id = $1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+
+    tx.commit().await?;
+    Ok(true)
+}

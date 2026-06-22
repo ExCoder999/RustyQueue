@@ -57,3 +57,39 @@ pub struct TaskStatus {
     pub last_error: Option<String>,
     pub created_at: DateTime<Utc>,
 }
+
+/// Lightweight task row for list endpoints (no payload blob).
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct TaskSummary {
+    pub id: Uuid,
+    pub queue: String,
+    pub status: String,
+    pub priority: i32,
+    pub retries: i16,
+    pub max_retries: i16,
+    pub last_error: Option<String>,
+    pub scheduled_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Per-queue status counts returned by GET /api/v1/queues.
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct QueueStats {
+    pub queue: String,
+    pub pending: i64,
+    pub processing: i64,
+    pub failed: i64,
+    pub completed: i64,
+}
+
+/// DLQ row for list/requeue endpoints (no payload blob).
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct DlqSummary {
+    pub id: Uuid,
+    pub queue: String,
+    pub retries: i16,
+    pub max_retries: i16,
+    pub last_error: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub failed_at: DateTime<Utc>,
+}

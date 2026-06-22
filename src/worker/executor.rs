@@ -162,7 +162,9 @@ async fn handle_failure(state: &Arc<AppState>, task: &DbTask, error: &str) {
             error = %error,
             "Task failed, scheduling retry"
         );
-        if let Err(e) = increment_retry(pool, task_id, error).await {
+        let base = state.config.queue.retry_base_delay_seconds as i64;
+        let max  = state.config.queue.retry_max_delay_seconds  as i64;
+        if let Err(e) = increment_retry(pool, task_id, error, base, max).await {
             tracing::error!(task_id = %task_id, error = %e, "Failed to increment retry");
         }
     }

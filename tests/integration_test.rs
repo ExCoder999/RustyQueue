@@ -34,6 +34,8 @@ async fn test_state(pool: sqlx::PgPool) -> std::sync::Arc<rustyqueue::AppState> 
             default_lease_seconds: 60,
             poll_interval_ms: 500,
             max_command_timeout_seconds: 60,
+            retry_base_delay_seconds: 5,
+            retry_max_delay_seconds: 300,
         },
         worker: WorkerConfig {
             queues: vec!["default".into()],
@@ -42,6 +44,7 @@ async fn test_state(pool: sqlx::PgPool) -> std::sync::Arc<rustyqueue::AppState> 
         server: ServerConfig {
             host: "127.0.0.1".into(),
             port: 8080,
+            max_concurrent_requests: 512,
         },
         observability: ObservabilityConfig { otel_endpoint: None },
     };
@@ -166,9 +169,15 @@ async fn test_circuit_breaker_blocks_writes_when_open() {
 
     let cfg = AppConfig {
         database: DatabaseConfig { url: "postgres://x".into(), max_connections: 1 },
-        queue: QueueConfig { default_lease_seconds: 60, poll_interval_ms: 500, max_command_timeout_seconds: 60 },
+        queue: QueueConfig {
+            default_lease_seconds: 60,
+            poll_interval_ms: 500,
+            max_command_timeout_seconds: 60,
+            retry_base_delay_seconds: 5,
+            retry_max_delay_seconds: 300,
+        },
         worker: WorkerConfig { queues: vec!["default".into()], num_workers_per_queue: 1 },
-        server: ServerConfig { host: "127.0.0.1".into(), port: 8080 },
+        server: ServerConfig { host: "127.0.0.1".into(), port: 8080, max_concurrent_requests: 512 },
         observability: ObservabilityConfig { otel_endpoint: None },
     };
 
@@ -319,4 +328,160 @@ async fn test_get_nonexistent_task_returns_404() {
 
     let response = app.oneshot(req).await.unwrap();
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+#[ignore = "requires live PostgreSQL at DATABASE_URL"]
+async fn test_list_tasks_returns_paged_response() {
+    let url = std::env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://rustyqueue:rustyqueue@localhost/rustyqueue".into());
+    let pool = sqlx::PgPool::connect(&url).await.unwrap();
+    sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+
+    let state = test_state(pool).await;
+    let app = rustyqueue::api::build_router(state.clone());
+
+    // Enqueue a task so the list is non-empty.
+    let enqueue_req = Request::builder()
+        .method("POST")
+        .uri("/api/v1/tasks")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            r#"{"queue":"list-test","payload":{"command":["true"]},"max_retries":0}"#,
+        ))
+        .unwrap();
+    let enqueue_resp = app.clone().oneshot(enqueue_req).await.unwrap();
+    assert_eq!(enqueue_resp.status(), StatusCode::ACCEPTED);
+
+    // List tasks filtered by the queue we just used.
+    let req = Request::builder()
+        .uri("/api/v1/tasks?queue=list-test&limit=10&offset=0")
+        .body(Body::empty())
+        .unwrap();
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+
+    assert!(json["total"].as_i64().unwrap() >= 1, "total should be at least 1");
+    assert!(json["items"].as_array().unwrap().len() >= 1);
+    assert_eq!(json["items"][0]["queue"].as_str().unwrap(), "list-test");
+}
+
+#[tokio::test]
+#[ignore = "requires live PostgreSQL at DATABASE_URL"]
+async fn test_list_queues_returns_stats() {
+    let url = std::env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://rustyqueue:rustyqueue@localhost/rustyqueue".into());
+    let pool = sqlx::PgPool::connect(&url).await.unwrap();
+    sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+
+    let state = test_state(pool).await;
+    let app = rustyqueue::api::build_router(state.clone());
+
+    // Seed a task so at least one queue appears.
+    let enqueue_req = Request::builder()
+        .method("POST")
+        .uri("/api/v1/tasks")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            r#"{"queue":"stats-test","payload":{"command":["true"]},"max_retries":0}"#,
+        ))
+        .unwrap();
+    app.clone().oneshot(enqueue_req).await.unwrap();
+
+    let req = Request::builder()
+        .uri("/api/v1/queues")
+        .body(Body::empty())
+        .unwrap();
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+
+    let queues = json.as_array().expect("expected JSON array");
+    let stats_queue = queues.iter().find(|q| q["queue"] == "stats-test");
+    assert!(stats_queue.is_some(), "stats-test queue should appear");
+
+    let s = stats_queue.unwrap();
+    // pending count must be a non-negative integer
+    assert!(s["pending"].as_i64().unwrap() >= 1);
+}
+
+#[tokio::test]
+#[ignore = "requires live PostgreSQL at DATABASE_URL"]
+async fn test_dlq_list_and_requeue() {
+    use rustyqueue::db::queries::{mark_failed, move_to_dlq};
+
+    let url = std::env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://rustyqueue:rustyqueue@localhost/rustyqueue".into());
+    let pool = sqlx::PgPool::connect(&url).await.unwrap();
+    sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+
+    let state = test_state(pool.clone()).await;
+    let app = rustyqueue::api::build_router(state.clone());
+
+    // Enqueue a task, manually fail it and move it to DLQ via query helpers.
+    let enqueue_req = Request::builder()
+        .method("POST")
+        .uri("/api/v1/tasks")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            r#"{"queue":"dlq-test","payload":{"command":["false"]},"max_retries":0}"#,
+        ))
+        .unwrap();
+    let resp = app.clone().oneshot(enqueue_req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let enqueue_json: Value = serde_json::from_slice(&body).unwrap();
+    let task_id_str = enqueue_json["task_id"].as_str().unwrap().to_string();
+    let task_id: uuid::Uuid = task_id_str.parse().unwrap();
+
+    mark_failed(&pool, task_id, "forced failure").await.unwrap();
+    move_to_dlq(&pool, task_id).await.unwrap();
+
+    // GET /api/v1/dlq should include our task.
+    let req = Request::builder()
+        .uri("/api/v1/dlq?queue=dlq-test")
+        .body(Body::empty())
+        .unwrap();
+    let response = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    assert!(json["total"].as_i64().unwrap() >= 1);
+    let found = json["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item["id"].as_str() == Some(&task_id_str));
+    assert!(found, "DLQ should contain the moved task");
+
+    // POST /api/v1/dlq/:id/requeue should move it back to tasks.
+    let requeue_req = Request::builder()
+        .method("POST")
+        .uri(format!("/api/v1/dlq/{}/requeue", task_id))
+        .body(Body::empty())
+        .unwrap();
+    let response = app.clone().oneshot(requeue_req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["requeued"], true);
+
+    // The task should now appear in GET /api/v1/tasks with status Pending.
+    let req = Request::builder()
+        .uri(format!("/api/v1/tasks/{}", task_id))
+        .body(Body::empty())
+        .unwrap();
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["status"].as_str().unwrap(), "Pending");
 }

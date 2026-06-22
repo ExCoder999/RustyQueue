@@ -20,6 +20,10 @@ pub struct QueueConfig {
     pub default_lease_seconds: u64,
     pub poll_interval_ms: u64,
     pub max_command_timeout_seconds: u64,
+    /// Base delay (seconds) for exponential retry backoff: delay = 2^attempt * base
+    pub retry_base_delay_seconds: u64,
+    /// Maximum retry backoff delay in seconds (caps the exponential growth)
+    pub retry_max_delay_seconds: u64,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -32,6 +36,9 @@ pub struct WorkerConfig {
 pub struct ServerConfig {
     pub host: String,
     pub port: u16,
+    /// Maximum number of in-flight HTTP requests before the server starts
+    /// returning 503 (backpressure via tower ConcurrencyLimitLayer).
+    pub max_concurrent_requests: usize,
 }
 
 #[derive(Debug, Deserialize, Clone)]

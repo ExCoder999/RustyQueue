@@ -5,7 +5,10 @@ use tokio_util::sync::CancellationToken;
 
 use crate::db::{
     models::DbTask,
-    queries::{increment_retry, is_task_cancelled, mark_complete, mark_failed, move_to_dlq, update_heartbeat},
+    queries::{
+        increment_retry, is_task_cancelled, mark_complete, mark_failed, move_to_dlq,
+        update_heartbeat,
+    },
 };
 use crate::metrics::{ACTIVE_WORKERS, TASKS_DURATION};
 use crate::AppState;
@@ -19,7 +22,9 @@ pub async fn execute_task(state: Arc<AppState>, task: DbTask) {
     // Register a cancellation token so the cancel endpoint can abort this
     // specific task without broadcasting a global shutdown signal.
     let cancel_token = CancellationToken::new();
-    state.task_cancel_tokens.insert(task_id, cancel_token.clone());
+    state
+        .task_cancel_tokens
+        .insert(task_id, cancel_token.clone());
 
     ACTIVE_WORKERS.inc();
     let start = std::time::Instant::now();
@@ -123,7 +128,10 @@ async fn run_command(
     if exit_status.success() {
         Ok(())
     } else {
-        Err(anyhow::anyhow!("Process exited with status: {}", exit_status))
+        Err(anyhow::anyhow!(
+            "Process exited with status: {}",
+            exit_status
+        ))
     }
 }
 
@@ -163,7 +171,7 @@ async fn handle_failure(state: &Arc<AppState>, task: &DbTask, error: &str) {
             "Task failed, scheduling retry"
         );
         let base = state.config.queue.retry_base_delay_seconds as i64;
-        let max  = state.config.queue.retry_max_delay_seconds  as i64;
+        let max = state.config.queue.retry_max_delay_seconds as i64;
         if let Err(e) = increment_retry(pool, task_id, error, base, max).await {
             tracing::error!(task_id = %task_id, error = %e, "Failed to increment retry");
         }

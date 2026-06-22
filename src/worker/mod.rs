@@ -25,7 +25,9 @@ pub async fn start(state: Arc<AppState>) -> JoinHandle<()> {
 
     // Return a handle that resolves on shutdown
     let mut rx = state.shutdown_tx.subscribe();
-    tokio::spawn(async move { let _ = rx.recv().await; })
+    tokio::spawn(async move {
+        let _ = rx.recv().await;
+    })
 }
 
 fn spawn_queue_workers(state: Arc<AppState>, queue: String, num_workers: usize) {
@@ -80,7 +82,9 @@ fn spawn_queue_length_poller(state: Arc<AppState>) {
             for queue in &queues {
                 match get_queue_length_by_queue(&state.pool, queue).await {
                     Ok(len) => QUEUE_LENGTH.with_label_values(&[queue]).set(len as f64),
-                    Err(e) => tracing::warn!(error = %e, queue = %queue, "Failed to poll queue length"),
+                    Err(e) => {
+                        tracing::warn!(error = %e, queue = %queue, "Failed to poll queue length")
+                    }
                 }
             }
         }

@@ -6,8 +6,8 @@ use axum::{
     Json,
 };
 use serde_json::json;
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use crate::AppState;
 

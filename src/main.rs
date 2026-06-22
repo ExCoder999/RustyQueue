@@ -1,5 +1,9 @@
 use clap::Parser;
-use rustyqueue::{api, config::{AppConfig, Cli}, db, metrics, watchdog, worker, AppState};
+use rustyqueue::{
+    api,
+    config::{AppConfig, Cli},
+    db, metrics, watchdog, worker, AppState,
+};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -11,8 +15,7 @@ use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, Env
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    let cfg = AppConfig::load(&cli.config_path)
-        .expect("Failed to load configuration");
+    let cfg = AppConfig::load(&cli.config_path).expect("Failed to load configuration");
 
     tracing_subscriber::registry()
         .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
@@ -21,10 +24,12 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!(config_path = %cli.config_path, "RustyQueue starting");
 
-    let pool = db::init_pool(&cfg.database).await
+    let pool = db::init_pool(&cfg.database)
+        .await
         .expect("Failed to initialize database pool");
 
-    db::run_migrations(&pool).await
+    db::run_migrations(&pool)
+        .await
         .expect("Failed to run database migrations");
 
     metrics::register_metrics();
@@ -82,13 +87,10 @@ fn start_circuit_breaker_monitor(
                 _ = shutdown_rx.recv() => return,
             }
 
-            let reachable = tokio::time::timeout(
-                Duration::from_millis(200),
-                pool.acquire(),
-            )
-            .await
-            .map(|r| r.is_ok())
-            .unwrap_or(false);
+            let reachable = tokio::time::timeout(Duration::from_millis(200), pool.acquire())
+                .await
+                .map(|r| r.is_ok())
+                .unwrap_or(false);
 
             if reachable {
                 if saturation_since.take().is_some() && flag.load(Ordering::Relaxed) {

@@ -5,11 +5,7 @@ use tokio::time::{sleep, Duration};
 use crate::db::{models::DbTask, queries::fetch_pending_task};
 use crate::AppState;
 
-pub async fn dispatch_loop(
-    state: Arc<AppState>,
-    queue: String,
-    tx: mpsc::Sender<DbTask>,
-) {
+pub async fn dispatch_loop(state: Arc<AppState>, queue: String, tx: mpsc::Sender<DbTask>) {
     let poll_interval = Duration::from_millis(state.config.queue.poll_interval_ms);
     let lease_secs = state.config.queue.default_lease_seconds as i64;
     let mut shutdown_rx = state.shutdown_tx.subscribe();

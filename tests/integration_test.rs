@@ -47,6 +47,7 @@ async fn test_state(pool: sqlx::PgPool) -> std::sync::Arc<rustyqueue::AppState> 
             host: "127.0.0.1".into(),
             port: 8080,
             max_concurrent_requests: 512,
+            api_keys: vec![],
         },
         observability: ObservabilityConfig {
             otel_endpoint: None,
@@ -176,6 +177,7 @@ async fn test_circuit_breaker_blocks_writes_when_open() {
             host: "127.0.0.1".into(),
             port: 8080,
             max_concurrent_requests: 512,
+            api_keys: vec![],
         },
         observability: ObservabilityConfig {
             otel_endpoint: None,
@@ -634,4 +636,113 @@ async fn test_requeue_all_dlq() {
         .unwrap();
     let json: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["requeued"].as_u64().unwrap(), 2);
+}
+
+// ---------------------------------------------------------------------------
+// API key auth tests (no DB required)
+// ---------------------------------------------------------------------------
+
+fn auth_app() -> (axum::Router, &'static str) {
+    use rustyqueue::{
+        config::{
+            AppConfig, DatabaseConfig, ObservabilityConfig, QueueConfig, ServerConfig, WorkerConfig,
+        },
+        AppState,
+    };
+    use std::sync::{atomic::AtomicBool, Arc};
+
+    const KEY: &str = "test-secret";
+
+    let cfg = AppConfig {
+        database: DatabaseConfig {
+            url: "postgres://x".into(),
+            max_connections: 1,
+        },
+        queue: QueueConfig {
+            default_lease_seconds: 60,
+            poll_interval_ms: 500,
+            max_command_timeout_seconds: 60,
+            retry_base_delay_seconds: 5,
+            retry_max_delay_seconds: 300,
+        },
+        worker: WorkerConfig {
+            queues: vec!["default".into()],
+            num_workers_per_queue: 1,
+        },
+        server: ServerConfig {
+            host: "127.0.0.1".into(),
+            port: 8080,
+            max_concurrent_requests: 512,
+            api_keys: vec![KEY.to_string()],
+        },
+        observability: ObservabilityConfig {
+            otel_endpoint: None,
+        },
+    };
+
+    let (shutdown_tx, _) = tokio::sync::broadcast::channel::<()>(1);
+    let pool = sqlx::PgPool::connect_lazy("postgres://user:pass@localhost/rustyqueue").unwrap();
+    let state = Arc::new(AppState {
+        pool,
+        config: cfg,
+        shutdown_tx,
+        circuit_open: Arc::new(AtomicBool::new(true)), // open so writes hit the CB, not the DB
+        task_cancel_tokens: Default::default(),
+    });
+
+    (rustyqueue::api::build_router(state), KEY)
+}
+
+#[tokio::test]
+async fn test_auth_missing_key_returns_401() {
+    let (app, _key) = auth_app();
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/v1/tasks")
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"queue":"q","payload":{}}"#))
+        .unwrap();
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn test_auth_wrong_key_returns_401() {
+    let (app, _key) = auth_app();
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/v1/tasks")
+        .header("content-type", "application/json")
+        .header("authorization", "Bearer totally-wrong")
+        .body(Body::from(r#"{"queue":"q","payload":{}}"#))
+        .unwrap();
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn test_auth_valid_key_reaches_circuit_breaker() {
+    // Circuit is open, so a write with a valid key should get 503, not 401.
+    let (app, key) = auth_app();
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/v1/tasks")
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {key}"))
+        .body(Body::from(r#"{"queue":"q","payload":{}}"#))
+        .unwrap();
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
+async fn test_metrics_exempt_from_auth() {
+    // /metrics must be reachable without any API key.
+    let (app, _key) = auth_app();
+    let req = Request::builder()
+        .uri("/metrics")
+        .body(Body::empty())
+        .unwrap();
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
 }

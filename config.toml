@@ -17,6 +17,8 @@ num_workers_per_queue = 4
 host = "0.0.0.0"
 port = 8080
 max_concurrent_requests = 512
+# Optional API keys. Empty list disables auth (development mode).
+api_keys = ["dev-secret-key"]
 
 [observability]
 otel_endpoint = "http://localhost:4317"

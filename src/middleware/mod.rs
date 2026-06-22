@@ -1,6 +1,6 @@
 use axum::{
     extract::{Request, State},
-    http::{Method, StatusCode},
+    http::{header, Method, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
     Json,
@@ -36,4 +36,39 @@ pub async fn circuit_breaker(
     }
 
     next.run(req).await
+}
+
+/// Validates `Authorization: Bearer <key>` against the configured api_keys list.
+/// Skips auth when api_keys is empty (development/open mode) or for /health and /metrics.
+pub async fn api_key_auth(
+    State(state): State<Arc<AppState>>,
+    req: Request,
+    next: Next,
+) -> Response {
+    if state.config.server.api_keys.is_empty() {
+        return next.run(req).await;
+    }
+
+    let path = req.uri().path();
+    if path == "/health" || path == "/metrics" {
+        return next.run(req).await;
+    }
+
+    let authorized = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(|key| state.config.server.api_keys.iter().any(|k| k == key))
+        .unwrap_or(false);
+
+    if authorized {
+        next.run(req).await
+    } else {
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "missing or invalid API key" })),
+        )
+            .into_response()
+    }
 }

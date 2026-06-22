@@ -11,7 +11,7 @@ use tower::limit::ConcurrencyLimitLayer;
 use tower::ServiceBuilder;
 use tower_http::trace::TraceLayer;
 
-use crate::middleware::circuit_breaker;
+use crate::middleware::{api_key_auth, circuit_breaker};
 use crate::AppState;
 use handlers::{
     batch_enqueue_handler, cancel_task_handler, enqueue_task, get_task, health_check,
@@ -39,7 +39,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         // Ops
         .route("/health", get(health_check))
         .route("/metrics", get(metrics_handler))
+        // Middleware stack (innermost first): circuit_breaker → api_key_auth → ConcurrencyLimit → Trace
         .layer(from_fn_with_state(state.clone(), circuit_breaker))
+        .layer(from_fn_with_state(state.clone(), api_key_auth))
         .layer(
             ServiceBuilder::new()
                 .layer(ConcurrencyLimitLayer::new(max_concurrent))

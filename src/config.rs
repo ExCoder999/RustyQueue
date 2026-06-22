@@ -39,6 +39,9 @@ pub struct ServerConfig {
     /// Maximum number of in-flight HTTP requests before the server starts
     /// returning 503 (backpressure via tower ConcurrencyLimitLayer).
     pub max_concurrent_requests: usize,
+    /// Accepted Bearer tokens. Empty list disables authentication entirely.
+    #[serde(default)]
+    pub api_keys: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
